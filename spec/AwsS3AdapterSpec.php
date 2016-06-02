@@ -17,6 +17,9 @@ use Prophecy\Argument;
 
 class AwsS3AdapterSpec extends ObjectBehavior
 {
+    /**
+     * @var \Aws\S3\S3Client
+     */
     private $client;
     private $bucket;
     const PATH_PREFIX = 'path-prefix';
@@ -73,8 +76,10 @@ class AwsS3AdapterSpec extends ObjectBehavior
 
     /**
      * @param \Aws\CommandInterface $command
+     * @param \Aws\CommandInterface $headCommand
+     * @param \Aws\CommandInterface $listCommand
      */
-    public function it_should_delete_files($command)
+    public function it_should_delete_files($command, $headCommand, $listCommand)
     {
         $key = 'key.txt';
         $this->client->getCommand('deleteObject', [
@@ -83,7 +88,7 @@ class AwsS3AdapterSpec extends ObjectBehavior
         ])->willReturn($command);
 
         $this->client->execute($command)->shouldBeCalled();
-        $this->make_it_404_on_has_object($key);
+        $this->make_it_404_on_has_object($headCommand, $listCommand, $key);
 
         $this->delete($key)->shouldBe(true);
     }
@@ -154,11 +159,87 @@ class AwsS3AdapterSpec extends ObjectBehavior
         $this->make_it_retrieve_file_metadata('getSize', $command);
     }
 
-    public function it_should_return_true_when_object_exists()
+    /**
+     * @param \Aws\CommandInterface $command
+     */
+    public function it_should_return_true_when_object_exists($command)
     {
         $key = 'key.txt';
+        $result = new Result();
         $this->client->doesObjectExist($this->bucket, self::PATH_PREFIX.'/'.$key)->willReturn(true);
+
         $this->has($key)->shouldBe(true);
+    }
+
+    /**
+     * @param \Aws\CommandInterface $command
+     */
+    public function it_should_return_true_when_prefix_exists($command)
+    {
+        $key = 'directory';
+        $result = new Result([
+            'Contents' => [
+                'Key' => 'directory/foo.txt',
+            ],
+        ]);
+        $this->client->doesObjectExist($this->bucket, self::PATH_PREFIX.'/'.$key)->willReturn(false);
+
+        $this->client->getCommand('listObjects', [
+            'Bucket' => $this->bucket,
+            'Prefix' => self::PATH_PREFIX.'/'.$key.'/',
+            'MaxKeys' => 1,
+        ])->willReturn($command);
+        $this->client->execute($command)->willReturn($result);
+
+        $this->has($key)->shouldBe(true);
+    }
+
+    /**
+     * @param \Aws\CommandInterface $command
+     * @param \Aws\S3\Exception\S3Exception $exception
+     */
+    public function it_should_return_false_when_listing_objects_returns_a_403($command, $exception)
+    {
+        $key = 'directory';
+        $this->client->doesObjectExist($this->bucket, self::PATH_PREFIX.'/'.$key)->willReturn(false);
+
+        $this->client->getCommand('listObjects', [
+            'Bucket' => $this->bucket,
+            'Prefix' => self::PATH_PREFIX.'/'.$key.'/',
+            'MaxKeys' => 1,
+        ])->willReturn($command);
+        $response = new Psr7\Response(403);
+        $exception = new S3Exception('Message', new Command('dummy'), [
+            'response' => $response,
+        ]);
+
+        $this->client->execute($command)->willThrow($exception);
+
+        $this->has($key)->shouldBe(false);
+    }
+
+    /**
+     * @param \Aws\CommandInterface $command
+     * @param \Aws\S3\Exception\S3Exception $exception
+     */
+    public function it_should_pass_through_when_listing_objects_throws_an_exception($command, $exception)
+    {
+        $key = 'directory';
+        $this->client->doesObjectExist($this->bucket, self::PATH_PREFIX.'/'.$key)->willReturn(false);
+
+        $this->client->getCommand('listObjects', [
+            'Bucket' => $this->bucket,
+            'Prefix' => self::PATH_PREFIX.'/'.$key.'/',
+            'MaxKeys' => 1,
+        ])->willReturn($command);
+        $response = new Psr7\Response(500);
+        $exception = new S3Exception('Message', new Command('dummy'), [
+            'response' => $response,
+        ]);
+
+        $this->client->execute($command)->willThrow($exception);
+
+        $this->shouldThrow(S3Exception::class)->duringHas($key);
     }
 
     /**
@@ -220,8 +301,10 @@ class AwsS3AdapterSpec extends ObjectBehavior
      * @param \Aws\CommandInterface $copyCommand
      * @param \Aws\CommandInterface $deleteCommand
      * @param \Aws\CommandInterface $aclCommand
+     * @param \Aws\CommandInterface $headCommand
+     * @param \Aws\CommandInterface $listCommand
      */
-    public function it_should_copy_and_delete_during_renames($copyCommand, $deleteCommand, $aclCommand)
+    public function it_should_copy_and_delete_during_renames($copyCommand, $deleteCommand, $aclCommand, $headCommand, $listCommand)
     {
         $sourceKey = 'newkey.txt';
         $key = 'key.txt';
@@ -229,7 +312,7 @@ class AwsS3AdapterSpec extends ObjectBehavior
         $this->make_it_retrieve_raw_visibility($aclCommand, $sourceKey, 'private');
         $this->make_it_copy_successfully($copyCommand, $key, $sourceKey, 'private');
         $this->make_it_delete_successfully($deleteCommand, $sourceKey);
-        $this->make_it_404_on_has_object($sourceKey);
+        $this->make_it_404_on_has_object($headCommand, $listCommand, $sourceKey);
         $this->rename($sourceKey, $key)->shouldBe(true);
     }
 
@@ -493,9 +576,17 @@ class AwsS3AdapterSpec extends ObjectBehavior
         ];
     }
 
-    private function make_it_404_on_has_object($key)
+    private function make_it_404_on_has_object($headCommand, $listCommand, $key)
     {
         $this->client->doesObjectExist($this->bucket, self::PATH_PREFIX.'/'.$key)->willReturn(false);
+
+        $result = new Result();
+        $this->client->getCommand('listObjects', [
+            'Bucket' => $this->bucket,
+            'Prefix' => self::PATH_PREFIX.'/'.$key.'/',
+            'MaxKeys' => 1,
+        ])->willReturn($listCommand);
+        $this->client->execute($listCommand)->willReturn($result);
     }
 
     private function make_it_404_on_get_metadata($key)

@@ -204,7 +204,11 @@ class AwsS3Adapter extends AbstractAdapter
     {
         $location = $this->applyPathPrefix($path);
 
-        return $this->s3Client->doesObjectExist($this->bucket, $location);
+        if ($this->s3Client->doesObjectExist($this->bucket, $location)) {
+            return true;
+        }
+
+        return $this->doesDirectoryExist($location);
     }
 
     /**
@@ -625,5 +629,36 @@ class AwsS3Adapter extends AbstractAdapter
         }
 
         return array_merge($result, Util::map($response, static::$resultMap), ['type' => 'file']);
+    }
+
+    /**
+     * @param $location
+     *
+     * @return bool
+     */
+    protected function doesDirectoryExist($location)
+    {
+        // Maybe this isn't an actual key, but a prefix.
+        // Do a prefix listing of objects to determine.
+        $command = $this->s3Client->getCommand(
+            'listObjects',
+            [
+                'Bucket' => $this->bucket,
+                'Prefix' => rtrim($location, '/') . '/',
+                'MaxKeys' => 1,
+            ]
+        );
+
+        try {
+            $result = $this->s3Client->execute($command);
+
+            return $result['Contents'] || $result['CommonPrefixes'];
+        } catch (S3Exception $e) {
+            if ($e->getStatusCode() === 403) {
+                return false;
+            }
+
+            throw $e;
+        }
     }
 }
